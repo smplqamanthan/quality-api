@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import cors from "cors";
 import mysql from "mysql2";
 import fetch from "node-fetch"; // <== add this
@@ -46,6 +46,68 @@ app.get("/api/data", (req, res) => {
   });
 });
 
+// ------------------- Unique Article Numbers API -------------------
+// Returns distinct ArticleNumber values that match query `q` (case- and space-insensitive)
+app.get("/api/unique-article-numbers", (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (!q) return res.json([]);
+
+  // Normalize query: lowercase and remove all spaces
+  const normalized = q.toLowerCase().replace(/\s+/g, "");
+
+  const sql = `
+    SELECT DISTINCT ArticleNumber
+    FROM uqe_data
+    WHERE REPLACE(LOWER(COALESCE(ArticleNumber, '')), ' ', '') LIKE ?
+    ORDER BY ArticleNumber ASC
+    LIMIT 200
+  `;
+
+  db.query(sql, ["%" + normalized + "%"], (err, rows) => {
+    if (err) {
+      console.error("DB error (unique-article-numbers):", err);
+      return res.json([]);
+    }
+    const uniquesByNormalized = new Map();
+    (rows || []).forEach(r => {
+      const raw = r.ArticleNumber;
+      if (raw === null || raw === undefined) return;
+      const original = String(raw).trim();
+      if (!original) return;
+      const key = original.toLowerCase().replace(/\s+/g, "");
+      if (!uniquesByNormalized.has(key)) {
+        uniquesByNormalized.set(key, original);
+      }
+    });
+    res.json(Array.from(uniquesByNormalized.values()));
+  });
+});
+
+// ------------------- Data by Article Numbers API -------------------
+// Fetch rows matching one or more Article Numbers (case/space-insensitive)
+app.get("/api/data-by-article", (req, res) => {
+  const raw = String(req.query.articles || "").trim();
+  if (!raw) return res.json([]);
+  const articles = raw.split(",").map(s => s.trim()).filter(Boolean);
+  if (!articles.length) return res.json([]);
+
+  const normalized = articles.map(s => s.toLowerCase().replace(/\s+/g, ""));
+  const placeholders = normalized.map(() => "?").join(",");
+  const sql = `
+    SELECT *
+    FROM uqe_data
+    WHERE REPLACE(LOWER(COALESCE(ArticleNumber, '')), ' ', '') IN (${placeholders})
+  `;
+
+  db.query(sql, normalized, (err, rows) => {
+    if (err) {
+      console.error("DB error (data-by-article):", err);
+      return res.json([]);
+    }
+    res.json(Array.isArray(rows) ? rows : []);
+  });
+});
+
 // ------------------- Restart API -------------------
 app.post("/api/restart", async (req, res) => {
   try {
@@ -76,7 +138,7 @@ app.post("/api/restart", async (req, res) => {
 
 
 // ------------------- SERVER -------------------
-const PORT = process.env.PORT || 9000;
+const PORT = process.env.PORT || 9000; // default aligned with frontend
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`API running at http://localhost:${PORT}`);
 });
