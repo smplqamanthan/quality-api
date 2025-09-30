@@ -12,90 +12,95 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ------------------- API -------------------
-app.get("/api/data", async (req, res) => {
+app.get("/api/data", (req, res) => {
   const { startDate, endDate, lotId } = req.query;
 
-  try {
-    let query = supabase.from("uqe_data");
+  let query = "";
+  let params = [];
 
-    if (lotId) {
-      const lots = lotId.split(",").map((l) => l.trim());
-      query = query.in("LotID", lots);
-    } else if (startDate && endDate) {
-      query = query
-        .gte("ShiftStartTime", `${startDate} 00:00:00`)
-        .lte("ShiftStartTime", `${endDate} 23:59:59`);
-    } else {
-      return res.json([]);
-    }
+  if (lotId) {
+    const lots = lotId.split(",").map(l => l.trim());
+    const placeholders = lots.map(() => "?").join(",");
+    query = `SELECT * FROM uqe_data WHERE LotID IN (${placeholders})`;
+    params = lots;
+  } else if (startDate && endDate) {
+    query = "SELECT * FROM uqe_data WHERE ShiftStartTime BETWEEN ? AND ?";
+    params = [`${startDate} 00:00:00`, `${endDate} 23:59:59`];
+  } else {
+    return res.json([]);
+  }
 
-    const { data, error } = await query.select("*");
+  console.log("Running query:", query, params);
 
-    if (error) {
-      console.error("Supabase query error:", error);
+  db.query(query, params, (err, results) => {
+    if (err) {
+      console.error("DB error:", err);
       return res.json({ error: "Database query failed" });
     }
-    res.json(data || []);
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
+    res.json(Array.isArray(results) ? results : []);
+  });
 });
 
 // ------------------- Unique Article Numbers API -------------------
-app.get("/api/unique-article-numbers", async (req, res) => {
+// Returns distinct ArticleNumber values that match query `q` (case- and space-insensitive)
+app.get("/api/unique-article-numbers", (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return res.json([]);
 
-  try {
-    // Use ILIKE in Supabase to search case-insensitive
-    const { data: rows, error } = await supabase
-      .from("uqe_data")
-      .select("ArticleNumber")
-      .ilike("ArticleNumber", `%${q}%`)
-      .limit(200);
+  // Normalize query: lowercase and remove all spaces
+  const normalized = q.toLowerCase().replace(/\s+/g, "");
 
-    if (error) {
-      console.error("Supabase error (unique-article-numbers):", error);
+  const sql = `
+    SELECT DISTINCT ArticleNumber
+    FROM uqe_data
+    WHERE REPLACE(LOWER(COALESCE(ArticleNumber, '')), ' ', '') LIKE ?
+    ORDER BY ArticleNumber ASC
+    LIMIT 200
+  `;
+
+  db.query(sql, ["%" + normalized + "%"], (err, rows) => {
+    if (err) {
+      console.error("DB error (unique-article-numbers):", err);
       return res.json([]);
     }
-
-    const uniques = Array.from(
-      new Set((rows || []).map((r) => r.ArticleNumber.trim()))
-    );
-
-    res.json(uniques);
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    res.status(500).json([]);
-  }
+    const uniquesByNormalized = new Map();
+    (rows || []).forEach(r => {
+      const raw = r.ArticleNumber;
+      if (raw === null || raw === undefined) return;
+      const original = String(raw).trim();
+      if (!original) return;
+      const key = original.toLowerCase().replace(/\s+/g, "");
+      if (!uniquesByNormalized.has(key)) {
+        uniquesByNormalized.set(key, original);
+      }
+    });
+    res.json(Array.from(uniquesByNormalized.values()));
+  });
 });
 
 // ------------------- Data by Article Numbers API -------------------
-app.get("/api/data-by-article", async (req, res) => {
+// Fetch rows matching one or more Article Numbers (case/space-insensitive)
+app.get("/api/data-by-article", (req, res) => {
   const raw = String(req.query.articles || "").trim();
   if (!raw) return res.json([]);
-  const articles = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  const articles = raw.split(",").map(s => s.trim()).filter(Boolean);
   if (!articles.length) return res.json([]);
 
-  try {
-    // Use Postgres LOWER for case-insensitive match
-    const normalizedArticles = articles.map((a) => a.toLowerCase());
-    const { data, error } = await supabase
-      .from("uqe_data")
-      .select("*")
-      .in("ArticleNumber", normalizedArticles);
+  const normalized = articles.map(s => s.toLowerCase().replace(/\s+/g, ""));
+  const placeholders = normalized.map(() => "?").join(",");
+  const sql = `
+    SELECT *
+    FROM uqe_data
+    WHERE REPLACE(LOWER(COALESCE(ArticleNumber, '')), ' ', '') IN (${placeholders})
+  `;
 
-    if (error) {
-      console.error("Supabase error (data-by-article):", error);
+  db.query(sql, normalized, (err, rows) => {
+    if (err) {
+      console.error("DB error (data-by-article):", err);
       return res.json([]);
     }
-
-    res.json(data || []);
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    res.status(500).json([]);
-  }
+    res.json(Array.isArray(rows) ? rows : []);
+  });
 });
 
 // ------------------- Restart API -------------------
@@ -106,9 +111,9 @@ app.post("/api/restart", async (req, res) => {
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.RENDER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
+          "Authorization": `Bearer ${process.env.RENDER_API_KEY}`,
+          "Content-Type": "application/json"
+        }
       }
     );
 
@@ -126,8 +131,9 @@ app.post("/api/restart", async (req, res) => {
   }
 });
 
+
 // ------------------- SERVER -------------------
-const PORT = process.env.PORT || 9000;
+const PORT = process.env.PORT || 9000; // default aligned with frontend
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`API running at http://localhost:${PORT}`);
 });
